@@ -24,6 +24,17 @@ export function safeLockName(name) {
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    if (error?.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
 export async function acquireHostLock({
   root,
   name,
@@ -34,10 +45,12 @@ export async function acquireHostLock({
   pollMs = 2000,
   now = () => Date.now(),
   wait = sleep,
+  isProcessAlive = processIsAlive,
 }) {
   await mkdir(root, {recursive: true, mode: 0o700});
   const lockDirectory = join(root, `${safeLockName(name)}.lock`);
   const startedAt = now();
+  let recoveredStaleLock = false;
 
   for (;;) {
     try {
@@ -47,17 +60,35 @@ export async function acquireHostLock({
         `${JSON.stringify({...owner, token, acquiredAt: new Date(now()).toISOString()}, null, 2)}\n`,
         {encoding: 'utf8', mode: 0o600, flag: 'wx'},
       );
-      return {lockDirectory, waitedMs: now() - startedAt};
+      return {lockDirectory, waitedMs: now() - startedAt, recoveredStaleLock};
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
     }
 
-    const lockStat = await stat(lockDirectory);
-    if (now() - lockStat.mtimeMs > staleMs) {
+    let lockStat;
+    try {
+      lockStat = await stat(lockDirectory);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    let ownerProcessIsDead = false;
+    try {
+      const currentOwner = JSON.parse(
+        await readFile(join(lockDirectory, 'owner.json'), 'utf8'),
+      );
+      ownerProcessIsDead = Number.isSafeInteger(currentOwner.pid) && !isProcessAlive(currentOwner.pid);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+
+    if (ownerProcessIsDead || now() - lockStat.mtimeMs > staleMs) {
       const abandoned = `${lockDirectory}.stale-${randomUUID()}`;
       try {
         await rename(lockDirectory, abandoned);
         await rm(abandoned, {recursive: true, force: true});
+        recoveredStaleLock = true;
         continue;
       } catch (error) {
         if (!['ENOENT', 'EEXIST'].includes(error?.code)) throw error;

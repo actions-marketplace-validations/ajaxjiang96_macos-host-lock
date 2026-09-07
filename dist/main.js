@@ -48,6 +48,7 @@ async function main() {
       runId: process.env.GITHUB_RUN_ID,
       runAttempt: process.env.GITHUB_RUN_ATTEMPT,
       runnerName: process.env.RUNNER_NAME,
+      pid: process.ppid,
     },
   });
 
@@ -58,6 +59,14 @@ async function main() {
     'wait-seconds',
     Math.floor(result.waitedMs / 1000),
   );
+  appendCommand(
+    process.env.GITHUB_OUTPUT,
+    'recovered-stale-lock',
+    result.recoveredStaleLock,
+  );
+  if (result.recoveredStaleLock) {
+    process.stdout.write('::warning::Recovered an abandoned stale host lock.\n');
+  }
   process.stdout.write(`Acquired macOS host lock "${name}".\n`);
 }
 
